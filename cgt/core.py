@@ -571,6 +571,8 @@ class InMemoryData(GetData):
         return self._value.size
     def set_value(self, value):
         value = value.astype(self.typ.dtype)
+        if hasattr(self, 'fixed_shape'):
+            value = value.reshape(self.fixed_shape)
         if self.use_numpy:
             self._value = value.copy()
         else:
