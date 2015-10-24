@@ -35,7 +35,8 @@ def as_valid_array(x, dtype=None):
     """
     Converts to numpy array and dtype with valid precision
     """
-    x = np.asarray(x)
+    if isinstance(x, int): x = np.array(x, 'i8')
+    else: x = np.asarray(x)
     x = x.astype(Dtype.canon(x.dtype) if dtype is None else dtype)
     return x
 
@@ -1399,7 +1400,7 @@ class Size(Op):
         return "Size{%i}"%self.axis
     def get_py_func(self, input_types):
         def f(reads):
-            return np.array(reads[0].shape[self.axis])
+            return np.array(reads[0].shape[self.axis],'i8')
         return f
     def pullback(self, inputs, output, goutput):
         raise NonDifferentiable
