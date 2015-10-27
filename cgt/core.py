@@ -230,7 +230,7 @@ class Node(object):
         """
         Return UNIQUE string identifying this Node
         """
-        if self.is_input():
+        if self.is_input() or self.op.is_random_op:
             return str(self.counter)
         else:
             hashobj = hashlib.md5(self.op.get_hash())
@@ -398,6 +398,7 @@ class Op(object):
     writes_to_input = -1 # whether output is allowed to have same underlying data as input
     available_impls = () # python, native_cpu, native_gpu
     is_data_op = False
+    is_random_op = False
 
     # pylint: disable=W0613
 
@@ -935,7 +936,7 @@ class ConstantTensor(Constant):
     def _c_code_valret(self):
         return r"""
             CGT_EXPORT_C cgtArray* $function($closure* cldata, cgtArray** reads) {
-                    auto out = new cgtArray(cldata->ndim, (size_t*)cldata->shape,
+                    auto out = new cgtArray(cldata->ndim, (long*)cldata->shape,
                         (cgtDtype)cldata->dtype, cgtCPU, (void*)cldata->data, false);
                     return out;
             }"""
@@ -999,7 +1000,7 @@ class Fill(Op):
         outdtype = Dtype.canon(self.value.dtype)
         func_code=r"""
             CGT_EXPORT_C void $function($closure* cldata, cgtArray** reads, cgtArray* write) {
-                size_t s = write->size();
+                long s = write->size();
                 %(cdtype)s value = cldata->value;
                 for (int i=0; i < s; ++i) write->at<%(cdtype)s>(i) = value;
             }"""%dict(cdtype = np2c[outdtype])
@@ -1036,12 +1037,12 @@ class Arange(Op):
     def get_native_compile_info(self, input_types, devtype):
         func_code=r"""
             CGT_EXPORT_C cgtArray* $function(void* cldata, cgtArray** reads) {
-                size_t start=reads[0]->at<size_t>(0),
-                       stop=reads[1]->at<size_t>(0),
-                       step=reads[2]->at<size_t>(0);
-                size_t size = (stop-start)/step;
+                long start=reads[0]->at<long>(0),
+                       stop=reads[1]->at<long>(0),
+                       step=reads[2]->at<long>(0);
+                long size = (stop-start)/step;
                 cgtArray* out = new cgtArray(1, &size, cgt_i8, cgtCPU);
-                for (int i=0; i < size; ++i) out->at<size_t>(i) = start+i*step;
+                for (int i=0; i < size; ++i) out->at<long>(i) = start+i*step;
                 return out;
             }"""
         return NativeCompileInfo(func_code=func_code)
@@ -1051,6 +1052,7 @@ class ScalarRng(Op):
     (shape...) -> array filled with iid random numbers, from either uniform or normal distribution
     """
     available_impls = ("python",)
+    is_random_op = True
     def __init__(self, kind):
         assert kind in ("uniform","gaussian")
         self.kind = kind
@@ -1073,12 +1075,12 @@ class ScalarRng(Op):
     def get_native_compile_info(self, input_types, devtype):
         func_code=r"""
             CGT_EXPORT_C void $function(void* cldata, cgtArray** reads, cgtArray* write) {
-                size_t start=reads[0]->at<size_t>(0),
-                       stop=reads[1]->at<size_t>(0),
-                       step=reads[2]->at<size_t>(0);
-                size_t size = (stop-start)/step;
+                long start=reads[0]->at<long>(0),
+                       stop=reads[1]->at<long>(0),
+                       step=reads[2]->at<long>(0);
+                long size = (stop-start)/step;
                 cgtArray* out = new cgtArray(1, &size, cgt_i8, cgtCPU);
-                for (int i=0; i < size; ++i) out->at<size_t>(i) = start+i*step;
+                for (int i=0; i < size; ++i) out->at<long>(i) = start+i*step;
                 return out;
             }"""
         return NativeCompileInfo(func_code=func_code)
@@ -1215,22 +1217,22 @@ class ElwiseUnary(Op):
             cuda_code = r"""
                 #include "cgt_cuda.h"
                 __forceinline__ __device__ %(cdtype1)s $function(%(cdtype0)s x) {return %(cexpr)s;}
-                __global__ void ${function}_kernel(const size_t n, const %(cdtype0)s* in, %(cdtype1)s* out) {
+                __global__ void ${function}_kernel(const long n, const %(cdtype0)s* in, %(cdtype1)s* out) {
                   CUDA_KERNEL_LOOP(i, n) {
                     out[i] = $function(in[i]);
                   }
                 }
-                void launchker_$function(size_t n, %(cdtype0)s* x, %(cdtype1)s* y) {
+                void launchker_$function(long n, %(cdtype0)s* x, %(cdtype1)s* y) {
                     int num_blocks, num_threads;
                     cgt_get_bt(n, num_blocks, num_threads);
                     ${function}_kernel<<<num_blocks, num_threads>>>(n, x, y);
                 }
                 """%d
             cpp_code = """
-                extern void launchker_${function}(size_t, %(cdtype0)s*, %(cdtype1)s*);
+                extern void launchker_${function}(long, %(cdtype0)s*, %(cdtype1)s*);
                 CGT_EXPORT_C void $function(void* cldata, cgtArray** reads, cgtArray* write) {
                     cgtArray* read = reads[0];
-                    size_t n = read->size();
+                    long n = read->size();
                     launchker_$function(n, (%(cdtype0)s*)reads[0]->data(), (%(cdtype1)s*)write->data());
                 }"""%d
             return NativeCompileInfo(cpp_code, includes=["math.h"], link_flags="-lm -lcudart",
@@ -1355,21 +1357,21 @@ class ElwiseBinary(Op):
             cuda_code = r"""
                 #include "cgt_cuda.h"
                 __forceinline__ __device__ %(cdtype2)s $function(%(cdtype0)s x, %(cdtype1)s y) {return %(cexpr)s;}
-                __global__ void ${function}_kernel(const size_t n, const %(cdtype0)s* x, const %(cdtype1)s* y, %(cdtype2)s* z) {
+                __global__ void ${function}_kernel(const long n, const %(cdtype0)s* x, const %(cdtype1)s* y, %(cdtype2)s* z) {
                   CUDA_KERNEL_LOOP(i, n) {
                     z[i] = $function(x[%(index0)s], y[%(index1)s]);
                   }
                 }
-                void launchker_$function(size_t n, %(cdtype0)s* x, %(cdtype1)s* y, %(cdtype2)s* z) {
+                void launchker_$function(long n, %(cdtype0)s* x, %(cdtype1)s* y, %(cdtype2)s* z) {
                     int num_blocks,num_threads;
                     cgt_get_bt(n, num_blocks, num_threads);
                     ${function}_kernel<<<num_blocks, num_threads>>>(n, x, y, z);
                 }
             """%d
             cpp_code = """
-                extern void launchker_${function}(size_t, %(cdtype0)s*, %(cdtype1)s*, %(cdtype2)s*);
+                extern void launchker_${function}(long, %(cdtype0)s*, %(cdtype1)s*, %(cdtype2)s*);
                 CGT_EXPORT_C void $function(void* cldata, cgtArray** reads, cgtArray* write) {
-                    size_t n = reads[%(ind4shape)s]->size();
+                    long n = reads[%(ind4shape)s]->size();
                     launchker_${function}(n, (%(cdtype0)s*)reads[0]->data(), (%(cdtype1)s*)reads[1]->data(), (%(cdtype2)s*)write->data());
                 }"""%d
             return NativeCompileInfo(func_code=cpp_code, includes=["math.h"], link_flags="-lm -lcudart", gpu_deref_mask=(True,True),
@@ -1422,7 +1424,7 @@ class Size(Op):
                 $closure* cl = ($closure*)cl0;
                 cgtArray* in = reads[0];
                 cgtArray* out = new cgtArray(0, NULL, cgt_i8, cgtCPU);
-                out->at<size_t>(0) = in->shape()[cl->ax];
+                out->at<long>(0) = in->shape()[cl->ax];
                 return out;
             }"""
         return NativeCompileInfo(code,closure_triples = self.get_closure())
@@ -1450,8 +1452,12 @@ class Reshape(Op):
         code = r"""
             CGT_EXPORT_C cgtArray* $function($closure* cldata, cgtArray** reads) {
                 cgtArray* in = reads[0];
-                size_t* newshape = new size_t[cldata->ndim];
-                for (int i=0; i < cldata->ndim; ++i) newshape[i] = static_cast<size_t*>(reads[i+1]->data())[0];
+                long* newshape = new long[cldata->ndim];
+                for (int i=0; i < cldata->ndim; ++i) {
+                    long s = reads[i+1]->at<long>(0);
+                    newshape[i] = static_cast<long*>(reads[i+1]->data())[0];
+                    cgt_assert((newshape[i] >= 0) && "negative size in reshape not supported");
+                }
                 cgtArray* out = new cgtArray(cldata->ndim, newshape, in->dtype(), in->devtype(), in->data(), false);
                 return out;
             }
@@ -1489,7 +1495,7 @@ class Concatenate(Op):
         outidxexpr =  ",".join([("i%i+n" if ax == self.axis else "i%i")%ax for ax in xrange(x.ndim)])
         code = r"""
             CGT_EXPORT_C void $function(void* cldata, cgtArray** reads, cgtArray* write) {
-                size_t n=0; // value along concat axis
+                long n=0; // value along concat axis
                 for (int i=0; i < %(n_in)s; ++i) {
                     cgtArray* in = reads[i];
                     %(openloops)s
@@ -1795,8 +1801,8 @@ class GetSli(Op):
         code = r"""
             CGT_EXPORT_C void $function(void* cldata, cgtArray** reads, cgtArray* write) {
                 cgtArray *in=reads[0];
-                size_t start = reads[1]->at<size_t>(0);
-                size_t step = reads[3]->at<size_t>(0);
+                long start = reads[1]->at<long>(0);
+                long step = reads[3]->at<long>(0);
                 %(openloops)s
                     write->at<%(cdtype)s>(%(outidxexpr)s) = in->at<%(cdtype)s>(%(inidxexpr)s);
                 %(closeloops)s
@@ -1842,8 +1848,8 @@ class IncSli(Op):
         code = r"""
             CGT_EXPORT_C void $function(void* cldata, cgtArray** reads, cgtArray* write) {
                 cgtArray *in=reads[0], *inc = reads[4];
-                long start = reads[1]->at<size_t>(0);
-                long step = reads[3]->at<size_t>(0);
+                long start = reads[1]->at<long>(0);
+                long step = reads[3]->at<long>(0);
                 cgt_assert(in->size() == write->size());
                 if (write->data() != in->data()) cgt_copy_array(write, in);
                 %(openloops)s
@@ -1887,13 +1893,13 @@ class GetFancySli(Op):
         closeloops = "}"*x.ndim
 
         outidxexpr = ",".join(["i%(ax)s"%dict(ax=ax) for ax in xrange(x.ndim)])
-        inidxexpr = ",".join([("inds->at<size_t>(i%(ax)s)" if ax==self.axis else "i%(ax)s")%dict(ax=ax) for ax in xrange(x.ndim)])
+        inidxexpr = ",".join([("inds->at<long>(i%(ax)s)" if ax==self.axis else "i%(ax)s")%dict(ax=ax) for ax in xrange(x.ndim)])
 
         code = r"""
             CGT_EXPORT_C void $function(void* cldata, cgtArray** reads, cgtArray* write) {
                 cgtArray *x=reads[0], *inds=reads[1];
-                size_t start = reads[1]->at<size_t>(0);
-                size_t step = reads[3]->at<size_t>(0);
+                long start = reads[1]->at<long>(0);
+                long step = reads[3]->at<long>(0);
                 %(openloops)s
                     write->at<%(cdtype)s>(%(outidxexpr)s) = x->at<%(cdtype)s>(%(inidxexpr)s);
                 %(closeloops)s
@@ -1935,7 +1941,7 @@ class IncFancySli(Op):
         closeloops = "}"*x.ndim
 
         incidxexpr = ",".join(["i%(ax)s"%dict(ax=ax) for ax in xrange(x.ndim)])
-        outidxexpr = ",".join([("inds->at<size_t>(i%(ax)s)" if ax==self.axis else "i%(ax)s")%dict(ax=ax) for ax in xrange(x.ndim)])
+        outidxexpr = ",".join([("inds->at<long>(i%(ax)s)" if ax==self.axis else "i%(ax)s")%dict(ax=ax) for ax in xrange(x.ndim)])
 
         code = r"""
             CGT_EXPORT_C void $function(void* cldata, cgtArray** reads, cgtArray* write) {
@@ -1974,7 +1980,7 @@ class GetFlatIndices(Op):
             CGT_EXPORT_C void $function(void**, cgtArray** xk, cgtArray* z) {
                 cgtArray *x=xk[0], *k=xk[1];
                 for (int i=0; i < z->size(); ++i) {
-                    z->at<%(cdtype)s>(i) = x->at<%(cdtype)s>(k->at<size_t>(i));
+                    z->at<%(cdtype)s>(i) = x->at<%(cdtype)s>(k->at<long>(i));
                 }
             }
             """%dict(cdtype = np2c[npdtype])
@@ -2010,7 +2016,7 @@ class IncFlatIndices(Op):
                 cgtArray *x=xkp[0], *k=xkp[1], *p=xkp[2];
                 if (write->data() != x->data()) cgt_memcpy(cgtCPU, cgtCPU, write, x, write->nbytes());
                 for (int i=0; i < p->size(); ++i) {
-                    write->at<%(cdtype)s>(k->at<size_t>(i)) += p->at<%(cdtype)s>(i);
+                    write->at<%(cdtype)s>(k->at<long>(i)) += p->at<%(cdtype)s>(i);
                 }
             }
             """%dict(cdtype = np2c[npdtype])
@@ -2045,7 +2051,7 @@ class Flip(Op):
             CGT_EXPORT_C void $function(void* cldata, cgtArray** reads, cgtArray* write) {
                 cgtArray *in=reads[0], *out=write;
                 cgt_assert(in->size() == out->size());
-                const size_t* shape = in->shape();
+                const long* shape = in->shape();
                 %(openloops)s
                     out->at<%(cdtype)s>(%(outidxexpr)s) = in->at<%(cdtype)s>(%(inidxexpr)s);
                 %(closeloops)s
